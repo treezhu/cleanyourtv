@@ -78,6 +78,13 @@
         android:allowBackup="false"
         android:localeConfig="@xml/locales_config">
 
+        <!-- The set's own source stack, VIDAA "FlowManager": the HDMI ports, the AV jacks and the tuner are
+             reachable only through it on sets that publish no TvInputInfo at all. A system shared library
+             (/system/etc/permissions/com.jamdeo.flow.xml); optional, so the launcher still installs and runs on
+             sets that do not ship it, and VendorSources drives it reflectively. -->
+        <uses-library
+            android:name="com.jamdeo.flow"
+            android:required="false" />
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -86,6 +93,7 @@
             android:excludeFromRecents="true"
             android:clearTaskOnLaunch="true"
             android:configChanges="orientation|screenSize|keyboard|keyboardHidden|uiMode"
+            android:directBootAware="true"
             android:screenOrientation="landscape">
             <!-- CVTE firmware (ro.CVT_EN_COMMON_HOME_INTENT=1) sends the Home key and boot as MAIN + HOME +
                  COMMON_HOME, which only matches a filter that lists both (#1201). In this one filter, not a second

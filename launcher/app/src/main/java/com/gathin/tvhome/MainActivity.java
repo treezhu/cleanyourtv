@@ -52,6 +52,7 @@ import android.text.Spanned;
 import android.text.TextPaint;
 import android.text.TextUtils;
 import android.text.style.ForegroundColorSpan;
+import android.util.Log;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -139,7 +140,18 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     private String sourcePanelService;
     private String sourcePanelAction;
     private String sourcePanelExtra;
+    /** The set's own full-screen source screen, started after a switch (VIDAA draws every source there). */
+    private String sourceScreen;
     private boolean coocaaSources;
+    /**
+     * The set's own source stack (com.jamdeo.flow), non-null only on sets that switch HDMI/AV/tuner through
+     * com.jamdeo.tv.service and publish no TvInputInfo at all (VIDAA). Its list replaces the empty
+     * TvInputManager one, and its service is what an entry switches. See VendorSources.
+     */
+    private VendorSources vendorSources;
+    /** Menu opens spent waiting for that binding to land: the service binds asynchronously, so the first
+     *  opening can come before its list is readable. */
+    private int vendorSourceRetries;
 
     private AppAdapter adapter;
     private RecyclerView grid;
@@ -506,7 +518,13 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         sourcePanelService = cfg.sourcePanelService;
         sourcePanelAction = cfg.sourcePanelAction;
         sourcePanelExtra = cfg.sourcePanelExtra;
+        // Not in Config: this is the one set-specific knob of the vendor source stack, read here so the class
+        // stays untouched.
+        sourceScreen = getString(R.string.source_screen).trim();
         coocaaSources = cfg.coocaaSources;
+        // Binds to com.jamdeo.tv.service in its constructor and stays bound for the process, so it is created
+        // once here rather than per menu. Null on sets without the library.
+        vendorSources = VendorSources.create(this);
 
         root = findViewById(R.id.root);
         root.setBackgroundColor(cfg.backgroundColor);
@@ -1280,12 +1298,54 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         // One LEANBACK query for both the tiles and the card checks.
         final List<ResolveInfo> leanback = getPackageManager().queryIntentActivities(
                 new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER), 0);
+        // Some TV firmware is plain Android rather than Leanback -- China-market Hisense JuUI, for one:
+        // most of its apps carry only the LAUNCHER category, so the query above yields a couple of tiles
+        // on a TV full of apps. Add those, one per package, after the Leanback ones. AppAdapter starts
+        // anything outside leanbackPackages with plain MAIN, which is how these apps open from the stock
+        // launcher, so they behave the same here.
+        final Set<String> tilePkgs = new HashSet<>();
+        for (ResolveInfo ri : leanback) tilePkgs.add(ri.activityInfo.packageName);
+        for (ResolveInfo ri : getPackageManager().queryIntentActivities(
+                new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0)) {
+            if (tilePkgs.add(ri.activityInfo.packageName)) leanback.add(ri);
+        }
+        // A few TV apps declare neither category -- Hisense JuUI's Live TV carries MAIN + DEFAULT only,
+        // so both queries above miss it and a dock slot asked for it stays empty. Give a tile only to the
+        // packages a theme actually asks for (dock_apps); AppAdapter opens tiles by component with plain
+        // MAIN, which is how these apps start from the stock launcher.
+        if (dockApps != null) {
+            for (String pkg : dockApps) {
+                if (pkg == null || pkg.isEmpty() || !tilePkgs.add(pkg)) continue;
+                ResolveInfo entry = dockEntryFor(pkg);
+                if (entry != null) leanback.add(entry); else tilePkgs.remove(pkg);
+            }
+        }
         cards = moduleCards ? CardFeature.run(() -> Cards.discover(this, hiddenApps,
                 () -> Cards.load(Cards.storeFile(this)), leanback), none) : none;
         adapter.reload(cards.isEmpty() ? none : CardFeature.run(() -> Cards.shown(cards), none), leanback);
         lastFocusedKey = returnKey;
         lastFocused = returnSlot;
         packageSequence = currentPackageSequence(packageSequence);
+    }
+
+    /**
+     * The entry point of a package the LEANBACK and LAUNCHER queries both miss, for a tile the theme
+     * asks for by name. Prefers an activity that looks like the app's own front screen over the helper
+     * screens such apps also declare (JuUI's Live TV lists LiveTvActivity, EpgActivity and a channel
+     * scan under MAIN), then falls back to the first one found; null when the package has none.
+     */
+    private ResolveInfo dockEntryFor(String pkg) {
+        List<ResolveInfo> found = getPackageManager().queryIntentActivities(
+                new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_DEFAULT).setPackage(pkg), 0);
+        ResolveInfo first = null;
+        for (ResolveInfo ri : found) {
+            if (ri.activityInfo == null) continue;
+            if (first == null) first = ri;
+            String name = ri.activityInfo.name;
+            if (name.contains("LiveTv") || name.contains("LiveTV") || name.endsWith("MainActivity")
+                    || name.endsWith("HomeActivity")) return ri;
+        }
+        return first;
     }
 
     /**
@@ -1457,6 +1517,16 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         // A real key, not onUserInteraction: that also runs when the firmware starts Live TV over Home at power-on.
         if (event.getAction() == KeyEvent.ACTION_DOWN) HomeKeyService.keyOnHome();
         if (homeIgnoreChannelKeys && RemoteKeys.isChannelKey(event.getKeyCode())) return true;
+        // The remote's Input key (KEYCODE_TV_INPUT 178 on this set) while Home is on screen. The firmware's own
+        // key path posts a panel event that only the stock launcher can render, and Home gets nothing to show, so
+        // Home answers the key itself from the set's source service (showVendorInputs). Only where that stack
+        // exists: elsewhere the key keeps whatever meaning the set gives it.
+        int inputCode = event.getKeyCode();
+        if (vendorSources != null
+                && (inputCode == KeyEvent.KEYCODE_TV_INPUT || inputCode == KeyEvent.KEYCODE_TV)) {
+            if (event.getAction() == KeyEvent.ACTION_UP && !event.isCanceled()) showInputs();
+            return true;
+        }
         // Vendor keys (TCL Netflix button, 4062) never reach the key services, only the focused window, so their
         // "hold:" entries run here too or nowhere. Only while resumed: onPause releases Home's holds, and a DOWN
         // taken after that would arm one nothing releases.
@@ -3243,7 +3313,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             return;
         }
         boolean any = liveTvIntent() != null || !sourcePanelService.isEmpty()
-                || (coocaaSources && !CoocaaSources.list(this).isEmpty());
+                || (coocaaSources && !CoocaaSources.list(this).isEmpty())
+                || vendorSources != null;
         TvInputManager tim = (TvInputManager) getSystemService(TV_INPUT_SERVICE);
         if (!any && tim != null) {
             for (TvInputInfo info : tim.getTvInputList()) {
@@ -3428,8 +3499,225 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         return component != null ? new Intent().setComponent(component) : new Intent(inputAction);
     }
 
+    /**
+     * The Inputs menu for sets whose sources live in their own service: VIDAA (Hisense 65E3G) publishes no
+     * TvInputInfo at all, so TvInputManager lists nothing and its panel is drawn by the stock launcher, which
+     * cannot be used from here. The stock panel is a strip of this same list, and picking an entry there switches
+     * the set through this same service, so this rebuilds it as a popup that works from any launcher.
+     */
+    /** The rows the menu shows, out of everything the service reports: the set lists its channel sources
+     *  separately (analog tuner, digital tuner and its own live channel source) and also a pseudo source for the
+     *  content portal ("OnDemand"), which has no screen of its own and would only leave the desktop looking
+     *  untouched. The three channel sources become one Live TV row (the live channel source wins, then digital,
+     *  then analog), and the order runs Live TV, HDMI in port order, the AV jacks, then the rest. */
+    private List<Integer> curateVendorSources(List<Integer> ids) {
+        Integer tuner = null;
+        int tunerRank = 0;
+        List<Integer> hdmi = new ArrayList<>();
+        List<Integer> av = new ArrayList<>();
+        List<Integer> rest = new ArrayList<>();
+        for (int id : ids) {
+            String token = String.valueOf(vendorSources.label(id)).trim().toUpperCase(Locale.ROOT);
+            int type = VendorSources.typeOf(id);
+            if (type == VendorSources.TYPE_ANDROID) continue;
+            int rank = token.contains("LIVETV") ? 3
+                    : type == VendorSources.TYPE_DTV ? 2
+                    : type == VendorSources.TYPE_ATV ? 1 : 0;
+            if (rank > 0) {
+                if (rank > tunerRank) {
+                    tunerRank = rank;
+                    tuner = id;
+                }
+                continue;
+            }
+            if (type == VendorSources.TYPE_HDMI) hdmi.add(id);
+            else if (type == VendorSources.TYPE_COMPOSITE) av.add(id);
+            else rest.add(id);
+        }
+        sortByPort(hdmi);
+        sortByPort(av);
+        sortByPort(rest);
+        List<Integer> ordered = new ArrayList<>();
+        if (tuner != null) ordered.add(tuner);
+        ordered.addAll(hdmi);
+        ordered.addAll(av);
+        ordered.addAll(rest);
+        Log.i("VendorSources", "menu " + ordered + " from " + ids);
+        return ordered;
+    }
+
+    /** Port order inside a group: the low byte of a source value is the jack number (HDMI1 before HDMI2). */
+    private void sortByPort(List<Integer> ids) {
+        Collections.sort(ids, (a, b) -> Integer.compare(a & 0xFF, b & 0xFF));
+    }
+
+    /** True for the channel sources the menu merges into one Live TV row: analog tuner, digital tuner and the
+     *  set's own live channel source (which the service names "LiveTV"). */
+    private boolean isLiveTvSource(int source) {
+        int type = VendorSources.typeOf(source);
+        if (type == VendorSources.TYPE_ATV || type == VendorSources.TYPE_DTV) return true;
+        return String.valueOf(vendorSources.label(source)).trim().toUpperCase(Locale.ROOT).contains("LIVETV");
+    }
+
+    private void showVendorInputs(List<Integer> ids) {
+        boolean underGear = topMenu;
+        View anchor = findViewById(underGear ? R.id.btnSettings : R.id.btnInputs);
+        // show_inputs_pill=false hides the pill; the gear is always there to hang the list from.
+        if (anchor.getVisibility() != View.VISIBLE) anchor = findViewById(R.id.btnSettings);
+        View panel = getLayoutInflater().inflate(R.layout.popup_inputs, root, false);
+        LinearLayout rows = panel.findViewById(R.id.rows);
+        int width = Math.max(anchor.getWidth(), (int) (150 * density));
+        final PopupWindow popup = glassPopup(panel, width);
+        for (int id : ids) {
+            boolean liveTv = isLiveTvSource(id);
+            String label = liveTv ? "电视直播" : vendorSourceName(id, vendorSources.label(id));
+            Boolean connected = vendorSources.connected(id);
+            // The row says which jacks have something on them, right-aligned next to the name. Live TV is a
+            // channel list rather than a jack, so it carries no state of its own.
+            int state = liveTv || connected == null ? -1
+                    : connected ? TvInputManager.INPUT_STATE_CONNECTED
+                    : TvInputManager.INPUT_STATE_DISCONNECTED;
+            final int source = id;
+            final String name = label;
+            int icon = liveTv ? R.drawable.ic_livetv : vendorSourceIcon(id);
+            addInputRow(rows, popup, icon, label, state, () -> switchToSource(source, name));
+        }
+        // Fit the widest row, as the TvInputManager list does: vendor names ("音视频输入") can be long.
+        panel.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED);
+        popup.setWidth(Math.max(width, Math.min(panel.getMeasuredWidth(), (int) (360 * density))));
+        int alignment = getResources().getBoolean(R.bool.rtl_menu_bar) != underGear ? Gravity.END : Gravity.START;
+        dropIn(popup, panel, anchor, alignment);
+        for (int i = 0; i < rows.getChildCount(); i++) {
+            View child = rows.getChildAt(i);
+            if (child.getVisibility() == View.VISIBLE && child.isFocusable()) {
+                child.requestFocus();
+                break;
+            }
+        }
+    }
+
+    /** Switches the set through its own source service, then hands the screen to that source's own screen. With a
+     *  picture the port's video fills it; without one it prints the port's name and says there is no signal, exactly
+     *  as picking the same entry on the stock panel does. */
+    private void switchToSource(int source, String label) {
+        if (vendorSources == null) return;
+        if (!vendorSources.select(source)) {
+            Toast.makeText(this, R.string.no_inputs, Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (startSourceScreen()) return;
+        // No source screen on this set: say the port is empty rather than leave the desktop looking untouched.
+        if (!Boolean.TRUE.equals(vendorSources.connected(source))) {
+            Toast.makeText(this, getString(R.string.source_no_signal, label), Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    /** Starts the set's own source screen (`source_screen`), true when something was started. */
+    private boolean startSourceScreen() {
+        ComponentName component = sourceScreen.isEmpty()
+                ? null : ComponentName.unflattenFromString(sourceScreen);
+        if (component == null) return false;
+        try {
+            startActivity(new Intent().setComponent(component).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            return true;
+        } catch (Throwable ignored) {
+            // Disabled or absent: the menu still switched the source, so fall back to the toast.
+            return false;
+        }
+    }
+
+    /** The set's own name for a source, in Chinese where the service uses its token ("HDMI1", "COMPOSITE1");
+     *  otherwise its name as given, and a name built from the source value when it gives none. */
+    private String vendorSourceName(int source, String vendorName) {
+        if (vendorName != null) {
+            String token = vendorName.trim().toUpperCase(Locale.ROOT);
+            if (token.startsWith("HDMI")) {
+                String port = token.substring(4).trim();
+                return port.isEmpty() ? "HDMI" : "HDMI " + port;
+            }
+            switch (token) {
+                case "ATV":
+                case "DTV":
+                case "LIVETV":
+                    // One row only: the menu merges the analog tuner, the digital tuner and the set's own
+                    // live channel source into a single Live TV entry.
+                    return "电视直播";
+                case "ONDEMAND":
+                    return "点播";
+                case "COMPOSITE1":
+                case "AV1":
+                    return "音视频输入";
+                case "COMPOSITE2":
+                case "AV2":
+                    return "音视频输入 2";
+                case "COMPONENT1":
+                    return "分量输入";
+                case "UNKNOWN":
+                    break;
+                default:
+                    return vendorName;
+            }
+        }
+        int index = source & 0xFF;
+        switch (VendorSources.typeOf(source)) {
+            case VendorSources.TYPE_DTV:
+                return "数字电视";
+            case VendorSources.TYPE_ATV:
+                return "模拟电视";
+            case VendorSources.TYPE_HDMI:
+                return "HDMI " + index;
+            case VendorSources.TYPE_COMPOSITE:
+                return index > 1 ? "音视频输入 " + index : "音视频输入";
+            case VendorSources.TYPE_COMPONENT:
+                return "分量输入";
+            case VendorSources.TYPE_VGA:
+                return "VGA";
+            case VendorSources.TYPE_SVIDEO:
+                return "S-Video";
+            case VendorSources.TYPE_PVR:
+                return "录像";
+            default:
+                return getString(R.string.inputs) + (index > 0 ? " " + index : "");
+        }
+    }
+
+    /** Tuner sources get the Live TV icon, the video jacks the composite one, the rest the Inputs icon. */
+    private int vendorSourceIcon(int source) {
+        switch (VendorSources.typeOf(source)) {
+            case VendorSources.TYPE_DTV:
+            case VendorSources.TYPE_ATV:
+                return R.drawable.ic_livetv;
+            case VendorSources.TYPE_COMPOSITE:
+            case VendorSources.TYPE_COMPONENT:
+            case VendorSources.TYPE_SVIDEO:
+            case VendorSources.TYPE_SCART:
+            case VendorSources.TYPE_VGA:
+                return R.drawable.ic_av;
+            default:
+                return R.drawable.ic_input;
+        }
+    }
     /** Dropdown menu under the Inputs pill: HDMI ports (with connection state), AV and Live TV. */
     private void showInputs() {
+        // The set's own source service first: on VIDAA sets (Hisense 65E3G) TvInputManager knows no inputs
+        // whatsoever, and the HDMI ports, the AV jacks and the tuner exist only there.
+        if (vendorSources != null) {
+            List<Integer> vendorIds = vendorSources.sources();
+            if (!vendorIds.isEmpty()) {
+                vendorSourceRetries = 0;
+                showVendorInputs(curateVendorSources(vendorIds));
+                return;
+            }
+            // Not bound yet, or the set is still enumerating: the service reports its list a moment after the
+            // menu is asked for, so give it a few goes before saying there is nothing.
+            if (vendorSourceRetries++ < 4) {
+                handler.postDelayed(this::showInputs, 400);
+                return;
+            }
+            vendorSourceRetries = 0;
+            Toast.makeText(this, R.string.no_inputs, Toast.LENGTH_SHORT).show();
+            return;
+        }
         // A configured source panel and no Live TV row to offer next to it: the panel is the whole menu.
         // The BYINTEK U4 needs this, as its TvInputManager lists three HDMI ports and an AV input it doesn't have.
         List<CoocaaSources.Source> coocaa = coocaaSources ? CoocaaSources.list(this) : Collections.emptyList();

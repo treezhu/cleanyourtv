@@ -10,6 +10,7 @@
     <string name="not_connected">No device</string>
     <string name="live_tv">Live TV</string>
     <string name="no_inputs">No inputs found</string>
+    <string name="source_no_signal">%1$s: no signal</string>
     <string name="more_inputs">More inputs</string>
     <string name="good_morning">Good morning</string>
     <string name="good_afternoon">Good afternoon</string>

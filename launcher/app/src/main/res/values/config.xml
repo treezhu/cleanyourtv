@@ -93,6 +93,8 @@
     <!-- A tile's artwork instead of the app's banner: "package=drawable", a banner_* drawable bundled with the
          launcher (res/drawable). banner_tv is a magenta field with the Live TV glyph. -->
     <string-array name="app_banners">
+        <item>com.hisense.aiot=banner_aiot</item>
+        <item>com.hisense.multiscreen.screenhelper=banner_screenhelper</item>
     </string-array>
 
     <!-- TVs with no TvInputManager have no HDMI list to read, but their own source-selection panel
@@ -106,6 +108,7 @@
          control_center_command=100 for its control center to open on the source row, as the remote's
          Source button does. Leave empty to omit. -->
     <string name="source_panel_extra" translatable="false"></string>
+    <string name="source_screen" translatable="false">com.jamdeo.tv.livetv/.LiveTvActivity</string>
 
     <!-- Coocaa OS (Skyworth, China) registers no inputs with TvInputManager; com.skyworth.tv lists its
          sources (HDMI 1, HDMI 2, AV, the tuner) through its own provider instead. true: show those in the
