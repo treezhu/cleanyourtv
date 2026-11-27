@@ -95,6 +95,7 @@
     <string-array name="app_banners">
         <item>com.hisense.aiot=banner_aiot</item>
         <item>com.hisense.multiscreen.screenhelper=banner_screenhelper</item>
+        <item>com.jamdeo.tv.mediacenter=banner_mediacenter</item>
     </string-array>
 
     <!-- TVs with no TvInputManager have no HDMI list to read, but their own source-selection panel
