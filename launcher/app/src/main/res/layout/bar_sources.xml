@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The remote's Input key, the way the set's own launcher draws it: one glass bar across the bottom of
+     Home, a card per source. Padding on the wrapper keeps the bar off the screen edges. -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/barWrap"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:paddingStart="56dp"
+    android:paddingEnd="56dp"
+    android:paddingBottom="44dp">
+
+    <LinearLayout
+        android:id="@+id/panel"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:background="@drawable/glass_panel"
+        android:paddingStart="18dp"
+        android:paddingEnd="18dp"
+        android:paddingTop="14dp"
+        android:paddingBottom="18dp">
+
+        <TextView
+            android:id="@+id/barTitle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/inputs"
+            android:textColor="#B3FFFFFF"
+            android:textSize="15sp"
+            android:letterSpacing="0.08"
+            android:fontFamily="@string/font_medium" />
+
+        <LinearLayout
+            android:id="@+id/cards"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:orientation="horizontal" />
+    </LinearLayout>
+</FrameLayout>

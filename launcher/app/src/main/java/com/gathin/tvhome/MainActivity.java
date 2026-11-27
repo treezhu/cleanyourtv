@@ -109,6 +109,9 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     static final String ACTION_APP_LIBRARY = "com.gathin.tvhome.action.APP_LIBRARY";
     /** The system input switcher, forwarded here by InputsRequestActivity while handle_view_inputs is on. */
     static final String ACTION_VIEW_INPUTS = "com.android.tv.action.VIEW_INPUTS";
+    /** Sent by InputKeyService: the remote's Input key pressed while another app was in front, so Home comes
+     *  up with its own source bar (the desktop answers the key directly when it is the one in front). */
+    static final String ACTION_SHOW_SOURCES = "com.gathin.tvhome.action.SHOW_SOURCES";
     /** Tiles per row and dock slots (res/values/config.xml, columns). Set in onCreate. */
     static int COLUMNS = 4;
     private boolean rtlAppGrid;
@@ -346,6 +349,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     private int packageSequence;
     /** The Inputs or Module cards dropdown while one is open, so onPause can close it. */
     private PopupWindow openPopup;
+    /** The source bar the remote's Input key opens (vendor style, across the bottom), while it is up. */
+    private PopupWindow sourceBar;
     /** Reorder mode is on (top-bar button). */
     private boolean reordering;
     /** Key of the tile being carried in reorder mode, or null. */
@@ -1028,7 +1033,27 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
      * top_menu hides the pill, so the list hangs under the gear there, as in showInputs().
      */
     private boolean openInputsIfAsked(Intent intent) {
-        if (intent == null || !ACTION_VIEW_INPUTS.equals(intent.getAction())) return false;
+        if (intent == null) return false;
+        // InputKeyService's answer while another app was in front: the bar sits at the bottom of the screen, so
+        // it needs no anchor, only a laid-out Home to hang off.
+        if (ACTION_SHOW_SOURCES.equals(intent.getAction())) {
+            setIntent(new Intent(Intent.ACTION_MAIN));
+            if (root.isLaidOut()) {
+                root.post(this::showSourceBar);
+                return true;
+            }
+            root.getViewTreeObserver().addOnGlobalLayoutListener(new ViewTreeObserver.OnGlobalLayoutListener() {
+                @Override
+                public void onGlobalLayout() {
+                    root.getViewTreeObserver().removeOnGlobalLayoutListener(this);
+                    root.post(() -> {
+                        if (!isFinishing()) showSourceBar();
+                    });
+                }
+            });
+            return true;
+        }
+        if (!ACTION_VIEW_INPUTS.equals(intent.getAction())) return false;
         setIntent(new Intent(Intent.ACTION_MAIN));
         View anchor = topMenu ? findViewById(R.id.btnSettings) : btnInputs;
         if (anchor.getVisibility() != View.VISIBLE) return true;
@@ -1406,6 +1431,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         if (cardPrompt != null) cardPrompt.dismiss();
         if (appLibrary != null) appLibrary.close();
         if (openPopup != null) openPopup.dismiss();
+        if (sourceBar != null) sourceBar.dismiss();
     }
 
     @Override
@@ -1519,12 +1545,13 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         if (homeIgnoreChannelKeys && RemoteKeys.isChannelKey(event.getKeyCode())) return true;
         // The remote's Input key (KEYCODE_TV_INPUT 178 on this set) while Home is on screen. The firmware's own
         // key path posts a panel event that only the stock launcher can render, and Home gets nothing to show, so
-        // Home answers the key itself from the set's source service (showVendorInputs). Only where that stack
-        // exists: elsewhere the key keeps whatever meaning the set gives it.
+        // Home answers the key itself from the set's source service (showSourceBar, drawn the way the stock
+        // launcher draws its bar). Only where that stack exists: elsewhere the key keeps whatever meaning the set
+        // gives it.
         int inputCode = event.getKeyCode();
         if (vendorSources != null
                 && (inputCode == KeyEvent.KEYCODE_TV_INPUT || inputCode == KeyEvent.KEYCODE_TV)) {
-            if (event.getAction() == KeyEvent.ACTION_UP && !event.isCanceled()) showInputs();
+            if (event.getAction() == KeyEvent.ACTION_UP && !event.isCanceled()) showSourceBar();
             return true;
         }
         // Vendor keys (TCL Netflix button, 4062) never reach the key services, only the focused window, so their
@@ -3591,6 +3618,72 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             View child = rows.getChildAt(i);
             if (child.getVisibility() == View.VISIBLE && child.isFocusable()) {
                 child.requestFocus();
+                break;
+            }
+        }
+    }
+
+    /**
+     * The remote's Input key, drawn the way the set's own launcher draws it: one glass bar across the bottom of
+     * Home with a card per source, first card focused. Picking a card switches through the set's source service,
+     * exactly as the same entry on the stock panel does. Falls back to the pill dropdown where the set's source
+     * service lists nothing (retried a few times first: the service answers late after a boot).
+     */
+    private void showSourceBar() {
+        if (vendorSources == null) {
+            showInputs();
+            return;
+        }
+        List<Integer> ids = vendorSources.sources();
+        if (ids.isEmpty()) {
+            if (vendorSourceRetries++ < 4) {
+                handler.postDelayed(this::showSourceBar, 400);
+                return;
+            }
+            vendorSourceRetries = 0;
+            Toast.makeText(this, R.string.no_inputs, Toast.LENGTH_SHORT).show();
+            return;
+        }
+        vendorSourceRetries = 0;
+        ids = curateVendorSources(ids);
+        if (sourceBar != null) sourceBar.dismiss();
+        View wrapper = getLayoutInflater().inflate(R.layout.bar_sources, root, false);
+        LinearLayout cards = wrapper.findViewById(R.id.cards);
+        for (int id : ids) {
+            boolean liveTv = isLiveTvSource(id);
+            String label = liveTv ? "电视直播" : vendorSourceName(id, vendorSources.label(id));
+            View card = getLayoutInflater().inflate(R.layout.item_source_card, cards, false);
+            ((ImageView) card.findViewById(R.id.icon))
+                    .setImageResource(liveTv ? R.drawable.ic_livetv : vendorSourceIcon(id));
+            ((TextView) card.findViewById(R.id.title)).setText(label);
+            final int source = id;
+            final String name = label;
+            card.setOnClickListener(v -> {
+                if (sourceBar != null) sourceBar.dismiss();
+                switchToSource(source, name);
+            });
+            cards.addView(card);
+        }
+        final PopupWindow popup = new PopupWindow(wrapper, ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT, true);
+        popup.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));   // needed for Back to dismiss
+        popup.setOutsideTouchable(true);
+        popup.setAnimationStyle(0);
+        popup.setElevation(0f);
+        popup.setOnDismissListener(() -> {
+            if (sourceBar == popup) sourceBar = null;
+        });
+        sourceBar = popup;
+        wrapper.setAlpha(0f);
+        wrapper.setTranslationY(28 * density);
+        popup.showAtLocation(root, Gravity.BOTTOM, 0, 0);
+        wrapper.animate().alpha(1f).translationY(0f)
+                .setDuration(reducedMotion ? Motion.REDUCED_MS : 220)
+                .setInterpolator(new android.view.animation.DecelerateInterpolator(1.6f)).start();
+        for (int i = 0; i < cards.getChildCount(); i++) {
+            View card = cards.getChildAt(i);
+            if (card.isFocusable()) {
+                card.requestFocus();
                 break;
             }
         }

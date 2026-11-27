@@ -77,9 +77,17 @@ public class InputKeyService extends AccessibilityService {
                 holdAppKeys.get(event.getKeyCode()))) return true;
         if (!isInputKey(event.getKeyCode())) return false;
         if (event.getAction() == KeyEvent.ACTION_UP && !event.isCanceled()) {
+            // Home draws the source bar the way the set's own launcher does; while another app is in front the key
+            // filter is the only place that sees the press, so Home is asked to put that bar up.
             try {
-                startActivity(new Intent(ACTION_VIEW_INPUTS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                startActivity(new Intent(MainActivity.ACTION_SHOW_SOURCES)
+                        .setClassName(this, "com.gathin.tvhome.MainActivity")
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
             } catch (ActivityNotFoundException | SecurityException ignored) {
+                try {
+                    startActivity(new Intent(ACTION_VIEW_INPUTS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                } catch (ActivityNotFoundException | SecurityException ignoredToo) {
+                }
             }
         }
         return true;
