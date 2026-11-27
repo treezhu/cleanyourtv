@@ -41,6 +41,7 @@
         android:layout_marginTop="8dp"
         android:orientation="horizontal"
         android:gravity="center_vertical"
+        android:duplicateParentState="true"
         android:visibility="gone">
 
         <View
@@ -48,6 +49,7 @@
             android:layout_width="7dp"
             android:layout_height="7dp"
             android:layout_marginEnd="6dp"
+            android:duplicateParentState="true"
             android:background="@drawable/status_dot" />
 
         <TextView

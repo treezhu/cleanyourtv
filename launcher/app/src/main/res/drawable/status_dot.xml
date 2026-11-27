@@ -1,4 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
-<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="oval">
-    <solid android:color="#FF34C759" />
-</shape>
+<!-- Green dot: something is on the jack. Deepened while the card is focused, because the focused
+     card turns white here and a bright green ring would wash out against it. -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_focused="true">
+        <shape android:shape="oval">
+            <solid android:color="#FF1B8E48" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="oval">
+            <solid android:color="#FF34C759" />
+        </shape>
+    </item>
+</selector>
