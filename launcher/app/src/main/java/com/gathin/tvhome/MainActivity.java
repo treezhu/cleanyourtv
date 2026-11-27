@@ -46,6 +46,8 @@ import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.os.storage.StorageManager;
+import android.os.storage.StorageVolume;
 import android.provider.Settings;
 import android.text.SpannableString;
 import android.text.Spanned;
@@ -155,6 +157,16 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     /** Menu opens spent waiting for that binding to land: the service binds asynchronously, so the first
      *  opening can come before its list is readable. */
     private int vendorSourceRetries;
+
+    /**
+     * A card for the stick in the set's USB slot. The source service does not list it at all (it is a file
+     * volume, not a jack), but the set's own bar shows it beside the jacks, so it is added on top of the
+     * service's list while a removable volume is mounted. Its type byte is unused by the service.
+     */
+    private static final int SOURCE_USB = 0xFF01;
+    /** Where the mounted stick's root is, and what the set calls it ("General U 盘"); null when none is in. */
+    private String usbVolumePath;
+    private String usbVolumeLabel;
 
     private AppAdapter adapter;
     private RecyclerView grid;
@@ -3569,8 +3581,71 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         ordered.addAll(hdmi);
         ordered.addAll(av);
         ordered.addAll(rest);
+        // The stick sits on the same bar as the jacks on the set's own launcher ("General U 盘 已接入"),
+        // after them; it only exists while one is plugged in.
+        if (findUsbVolume()) ordered.add(SOURCE_USB);
         Log.i("VendorSources", "menu " + ordered + " from " + ids);
         return ordered;
+    }
+
+    /** Looks for a mounted removable volume (the USB slot, or a card reader) and remembers where it is and
+     *  what the set calls it. True when one is in, so callers can put it on the source bar.
+     *
+     *  <p>The volume is found through {@link #getExternalFilesDirs}, which answers only for volumes the app can
+     *  see right now and needs no permission, rather than by listing /storage, which is unreadable to an app
+     *  (the stick's mount point is there but cannot be listed, let alone stat'd). */
+    private boolean findUsbVolume() {
+        usbVolumePath = null;
+        usbVolumeLabel = null;
+        File[] dirs = getExternalFilesDirs(null);
+        for (File dir : dirs) {
+            if (dir == null) continue;
+            String path = dir.getAbsolutePath();
+            int cut = path.indexOf("/Android/");
+            if (cut <= 0) continue;
+            String mount = path.substring(0, cut);
+            // The set's own storage, not a stick: the shared volume lives under /storage/emulated.
+            if (mount.contains("/emulated")) continue;
+            String name = new File(mount).getName();
+            String label = name;
+            try {
+                StorageManager sm = (StorageManager) getSystemService(STORAGE_SERVICE);
+                for (StorageVolume volume : sm.getStorageVolumes()) {
+                    String uuid = volume.getUuid();
+                    if (uuid == null || !uuid.equalsIgnoreCase(name) || !volume.isRemovable()) continue;
+                    String described = volume.getDescription(this);
+                    if (described != null && !described.trim().isEmpty()) label = described.trim();
+                    break;
+                }
+            } catch (Throwable ignored) {
+                // No StorageManager detail: the mount point's own name does as a label.
+            }
+            usbVolumePath = mount;
+            usbVolumeLabel = label;
+            Log.i("VendorSources", "usb " + usbVolumePath + " " + usbVolumeLabel);
+            return true;
+        }
+        return false;
+    }
+
+    /** Opens the set's media centre on the stick, which is what picking the USB entry on the set's own bar
+     *  leads to (its device list starts on that volume). */
+    private void openUsb() {
+        Intent media = new Intent().setComponent(new ComponentName("com.jamdeo.tv.mediacenter",
+                "com.jamdeo.tv.mediacenter.MediaCenterActivity"));
+        try {
+            startActivity(media.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            return;
+        } catch (Throwable ignored) {
+            // No media centre on this set: fall back to whatever browses a folder.
+        }
+        Intent view = new Intent(Intent.ACTION_VIEW);
+        if (usbVolumePath != null) view.setDataAndType(Uri.parse("file://" + usbVolumePath), "*/*");
+        try {
+            startActivity(view.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        } catch (Throwable t) {
+            Toast.makeText(this, R.string.no_inputs, Toast.LENGTH_SHORT).show();
+        }
     }
 
     /** Port order inside a group: the low byte of a source value is the jack number (HDMI1 before HDMI2). */
@@ -3596,9 +3671,11 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         int width = Math.max(anchor.getWidth(), (int) (150 * density));
         final PopupWindow popup = glassPopup(panel, width);
         for (int id : ids) {
-            boolean liveTv = isLiveTvSource(id);
-            String label = liveTv ? "电视直播" : vendorSourceName(id, vendorSources.label(id));
-            Boolean connected = vendorSources.connected(id);
+            boolean usb = id == SOURCE_USB;
+            boolean liveTv = !usb && isLiveTvSource(id);
+            String label = usb ? usbVolumeLabel
+                    : liveTv ? "电视直播" : vendorSourceName(id, vendorSources.label(id));
+            Boolean connected = usb ? Boolean.TRUE : vendorSources.connected(id);
             // The row says which jacks have something on them, right-aligned next to the name. Live TV is a
             // channel list rather than a jack, so it carries no state of its own.
             int state = liveTv || connected == null ? -1
@@ -3606,8 +3683,11 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
                     : TvInputManager.INPUT_STATE_DISCONNECTED;
             final int source = id;
             final String name = label;
-            int icon = liveTv ? R.drawable.ic_livetv : vendorSourceIcon(id);
-            addInputRow(rows, popup, icon, label, state, () -> switchToSource(source, name));
+            final boolean isUsb = usb;
+            int icon = usb ? R.drawable.ic_usb
+                    : liveTv ? R.drawable.ic_livetv : vendorSourceIcon(id);
+            addInputRow(rows, popup, icon, label, state,
+                    () -> { if (isUsb) openUsb(); else switchToSource(source, name); });
         }
         // Fit the widest row, as the TvInputManager list does: vendor names ("音视频输入") can be long.
         panel.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED);
@@ -3650,18 +3730,21 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         View wrapper = getLayoutInflater().inflate(R.layout.bar_sources, root, false);
         LinearLayout cards = wrapper.findViewById(R.id.cards);
         for (int id : ids) {
-            boolean liveTv = isLiveTvSource(id);
-            String label = liveTv ? "电视直播" : vendorSourceName(id, vendorSources.label(id));
+            boolean usb = id == SOURCE_USB;
+            boolean liveTv = !usb && isLiveTvSource(id);
+            String label = usb ? usbVolumeLabel
+                    : liveTv ? "电视直播" : vendorSourceName(id, vendorSources.label(id));
             View card = getLayoutInflater().inflate(R.layout.item_source_card, cards, false);
             ((ImageView) card.findViewById(R.id.icon))
-                    .setImageResource(liveTv ? R.drawable.ic_livetv : vendorSourceIcon(id));
+                    .setImageResource(usb ? R.drawable.ic_usb
+                            : liveTv ? R.drawable.ic_livetv : vendorSourceIcon(id));
             ((TextView) card.findViewById(R.id.title)).setText(label);
             // Whether anything sits on the jack, the way the stock bar says it. Live TV is a channel list
             // rather than a jack, and this set answers "standby" when it cannot tell, so only definite
-            // states get a dot.
-            Boolean connected = vendorSources.connected(id);
+            // states get a dot. The stick is only listed while it is in, so it always reads as connected.
+            Boolean connected = usb ? Boolean.TRUE : vendorSources.connected(id);
             View stateRow = card.findViewById(R.id.stateRow);
-            if (!liveTv && connected != null) {
+            if ((usb || !liveTv) && connected != null) {
                 stateRow.setVisibility(View.VISIBLE);
                 ((View) card.findViewById(R.id.dot)).setBackgroundResource(
                         connected ? R.drawable.status_dot : R.drawable.status_dot_off);
@@ -3670,9 +3753,11 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             }
             final int source = id;
             final String name = label;
+            final boolean isUsb = usb;
             card.setOnClickListener(v -> {
                 if (sourceBar != null) sourceBar.dismiss();
-                switchToSource(source, name);
+                if (isUsb) openUsb();
+                else switchToSource(source, name);
             });
             cards.addView(card);
         }
@@ -3705,6 +3790,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
      *  picture the port's video fills it; without one it prints the port's name and says there is no signal, exactly
      *  as picking the same entry on the stock panel does. */
     private void switchToSource(int source, String label) {
+        if (source == SOURCE_USB) {
+            openUsb();
+            return;
+        }
         if (vendorSources == null) return;
         if (!vendorSources.select(source)) {
             Toast.makeText(this, R.string.no_inputs, Toast.LENGTH_SHORT).show();
