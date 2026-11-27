@@ -33,6 +33,7 @@
     <string name="enable">开启</string>
     <string name="choose_input">输入源</string>
     <string name="connected">已连接</string>
+    <string name="signal_source">信号源</string>
     <string name="standby">待机</string>
     <string name="not_connected">未连接</string>
     <string name="live_tv">电视直播</string>

@@ -3656,6 +3656,18 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             ((ImageView) card.findViewById(R.id.icon))
                     .setImageResource(liveTv ? R.drawable.ic_livetv : vendorSourceIcon(id));
             ((TextView) card.findViewById(R.id.title)).setText(label);
+            // Whether anything sits on the jack, the way the stock bar says it. Live TV is a channel list
+            // rather than a jack, and this set answers "standby" when it cannot tell, so only definite
+            // states get a dot.
+            Boolean connected = vendorSources.connected(id);
+            View stateRow = card.findViewById(R.id.stateRow);
+            if (!liveTv && connected != null) {
+                stateRow.setVisibility(View.VISIBLE);
+                ((View) card.findViewById(R.id.dot)).setBackgroundResource(
+                        connected ? R.drawable.status_dot : R.drawable.status_dot_off);
+                ((TextView) card.findViewById(R.id.status))
+                        .setText(connected ? R.string.connected : R.string.not_connected);
+            }
             final int source = id;
             final String name = label;
             card.setOnClickListener(v -> {
